@@ -26,25 +26,28 @@ static char target_host[MAX_HOST_SIZE];
 static char httpMethods[][MAX_HTTPMETHOD_SIZE] = {"GET ", "POST", "HEAD", "PUT ", "DELETE", "OPTIONS", "CONNECT", "TRACE", "PATCH"};
 
 int F[MAX_DATA_SIZE];
+unsigned char *HOST = (unsigned char *)"Host: ";
+int HOST_LEN = 6;
+
 std::unordered_set<std::string> unsafe_sites;
 
-/**
+/*
 * @ brief return vetor of idx
 */
-std::vector<int> str_cmp(unsigned char *src, int src_len, unsigned char *dst, int dst_len) {
+static std::vector<int> get_host_idxes(unsigned char *src, int src_len) {
   // src string x
   unsigned char *x = (unsigned char *)malloc(sizeof(unsigned char) * (src_len + 1));
   memcpy(x, "?", sizeof(unsigned char));
   memcpy(x + 1, src, sizeof(unsigned char) * src_len);
 
   // dst string y
-  unsigned char *y = (unsigned char *)malloc(sizeof(unsigned char) * (dst_len + 1));
+  unsigned char *y = (unsigned char *)malloc(sizeof(unsigned char) * (HOST_LEN + 1));
   memcpy(y, "?", sizeof(unsigned char));
-  memcpy(y + 1, dst, sizeof(unsigned char) * dst_len);
+  memcpy(y + 1, HOST, sizeof(unsigned char) * HOST_LEN);
 
-  // KMP init
+  // KMP init // TODO
   F[0] = -1;
-  for (int i = 1; i < dst_len + 1; i++) {
+  for (int i = 1; i < HOST_LEN + 1; i++) {
     int pos = F[i - 1];
     while (pos != -1 && y[pos + 1] != y[i]) pos = F[pos];
     if (y[pos + 1] == y[i]) F[i] = pos + 1;
@@ -57,7 +60,7 @@ std::vector<int> str_cmp(unsigned char *src, int src_len, unsigned char *dst, in
     while (pos != -1 && y[pos + 1] != x[i]) pos = F[pos];
     pos = pos + 1;
 
-    if (pos == dst_len) {
+    if (pos == HOST_LEN) {
       ans.push_back(i - pos + 1);
       pos = F[pos];
     }
@@ -74,21 +77,25 @@ static void init_unsafe_sites(char *file_name) {
   return;
 }
 
-static bool is_http(unsigned char *data) {
+static bool is_http(unsigned char *data, int len) {
   // ipv4
   struct libnet_ipv4_hdr *iphdr = (struct libnet_ipv4_hdr *)data;
   if (iphdr->ip_v != 4 || iphdr->ip_p != IPPROTO_TCP) return 0;
+  int ipHdrLen = iphdr->ip_hl << 2;
 
   // tcp
-  struct libnet_tcp_hdr *tcphdr =
-      (struct libnet_tcp_hdr *)(data + (iphdr->ip_hl << 2));
-  char *payload = (char *)(data + (iphdr->ip_hl << 2) + (tcphdr->th_off << 2));
+  struct libnet_tcp_hdr *tcphdr = (struct libnet_tcp_hdr *)(data + ipHdrLen);
+  int tcpHdrLen = tcphdr->th_off << 2;
+
+  char *payload = (char *)(data + ipHdrLen + tcpHdrLen);
 
   // http
   for (int i = 0; i < sizeof(httpMethods) / MAX_HTTPMETHOD_SIZE; i++) {
-    if (!strncmp(httpMethods[i], payload, strlen(httpMethods[i])) ||
-        !strncmp(httpMethods[i], payload + 1, strlen(httpMethods[i])) ||
-        !strncmp(httpMethods[i], payload + 2, strlen(httpMethods[i]))) {
+    int methodLen = strlen(httpMethods[i]);
+    if (len - ipHdrLen - tcpHdrLen < methodLen) continue;
+    if (!strncmp(httpMethods[i], payload, methodLen) ||
+        !strncmp(httpMethods[i], payload + 1, methodLen) ||
+        !strncmp(httpMethods[i], payload + 2, methodLen)) {
       printf("[+] Found HTTP packet\n");
       return 1;
     }
@@ -99,16 +106,16 @@ static bool is_http(unsigned char *data) {
 static bool check_drop(unsigned char *data, int len) {
   // check host
   unsigned char target[MAX_HOST_SIZE + 8] = "Host: ";
-  std::vector<int> indices = str_cmp(data, len, target, 6);
+  std::vector<int> indices = get_host_idxes(data, len);
   if (!indices.size()) {
     printf("Can't find host\n");
     return 0;
   } else if (indices.size() != 1) {
     printf("Found more than one host\n");
-    return 1;  //TODO what shoud I do
+    return 0;
   }
 
-  // get host
+  // get host length
   int host_len = 0;
   int begin_idx = indices[0] - 1;
   for (int i = begin_idx + 6; i < len - 1; i++) {
@@ -121,6 +128,8 @@ static bool check_drop(unsigned char *data, int len) {
     printf("Can't find host\n");
     return 0;
   }
+
+  // get host
   std::string host;
   for (int i = 0; i < host_len; i++) host.push_back((char)(data[begin_idx + 6 + i]));
   printf("[+] Host: %s\n", host.c_str());
@@ -173,7 +182,7 @@ static IdIsDrop print_pkt(struct nfq_data *tb) {  //! check Host
   ret = nfq_get_payload(tb, &data);
   if (ret >= 0) {
     // printf("payload_len=%d ", ret);
-    if (is_http(data) && check_drop(data, ret)) isDrop = 1, printf("[+] Dropped packet");
+    if (is_http(data, ret) && check_drop(data, ret)) isDrop = 1, printf("[+] Dropped packet");
   }
   fputc('\n', stdout);
 

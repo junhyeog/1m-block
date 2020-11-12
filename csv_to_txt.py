@@ -2,7 +2,7 @@
 """
 Created on Mon Nov  9 21:29:57 2020
 
-@author: User
+@author: Yun, Junhyuk
 """
 
 import csv
